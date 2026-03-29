@@ -1,0 +1,22 @@
+# Task: Turn On LED (CALVIN)
+# @package _global_
+
+task:
+  name: button_on
+  backend: calvin
+
+main:
+  instruction: "turn on the LED by pressing the button"
+
+backend:
+  calvin:
+    target_behavior: turn_on_led
+    scene_cfg:
+      objects:
+        fixed_objects:
+          table:
+            buttons:
+              base__button: {initial_state: 0, effect: led}
+
+gemini_grounding:
+  default_objects: [button, LED light]

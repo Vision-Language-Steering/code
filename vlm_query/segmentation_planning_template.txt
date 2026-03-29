@@ -1,0 +1,52 @@
+You are helping a robot manipulation system identify what object parts to segment for keypoint detection.
+
+Given a task instruction and an image of the scene, identify the specific object parts that are relevant for manipulation.
+
+**Important:**
+- Be SPECIFIC about which part of each object (e.g., "drawer handle" not just "drawer")
+- Use APPEARANCE-BASED descriptions that SAM3 can recognize:
+  - Good: "drawer handle", "sliding lever", "black circle", "red cube", "magenta cube", "white ball"
+  - Bad: "switch", "button", "light switch", "pink cube" (SAM3 doesn't understand these)
+  - For switch: use "top handle"
+  - For button: use "black circle"
+  - For pink cube: use "magenta cube"
+  - For light bulb: use "white ball"
+- Focus on parts the robot gripper needs to interact with
+- Include "gripper" if visible
+- Output 2-5 object parts maximum
+
+**Task:** "{instruction}"
+
+**Output format (JSON only, no explanation):**
+```json
+{{"object_parts": ["part1", "part2", ...]}}
+```
+
+**Examples:**
+
+Task: "close the drawer"
+```json
+{{"object_parts": ["gripper", "drawer handle", "drawer"]}}
+```
+
+Task: "pick up the red cube"
+```json
+{{"object_parts": ["gripper", "red cube"]}}
+```
+
+Task: "turn on the light switch"
+```json
+{{"object_parts": ["gripper", "metal lever", "gray handle"]}}
+```
+
+Task: "put the blue block in the drawer"
+```json
+{{"object_parts": ["gripper", "blue cube", "drawer", "drawer handle"]}}
+```
+
+Task: "press the button"
+```json
+{{"object_parts": ["gripper", "round surface", "metal button"]}}
+```
+
+Now analyze the image and provide the object parts for the given task.

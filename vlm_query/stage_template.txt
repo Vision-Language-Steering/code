@@ -1,0 +1,118 @@
+## Instructions
+You are assisting a robot diffusion policy in deciding **which stage to execute NEXT** and whether guidance is needed.
+
+The policy generates action chunks. Before each new chunk, we query you to determine:
+1. Which stage should the NEXT chunk work on?
+2. Should we apply guidance for that stage?
+
+**CRITICAL:** You are deciding for the NEXT action chunk, not describing what just happened.
+
+---
+
+## Query Trigger Reason
+This query was triggered because: **{trigger_reason}**
+
+Interpret the trigger:
+- **"gripper closed"**: The robot just grasped something → The NEXT chunk likely needs to MOVE to the place location (advance to the next stage).
+- **"gripper opened"**: The robot just released something → Check if the task is DONE (stage 0) or needs another action.
+- **"reward rose above X%"**: The robot is getting close to the current stage target → May be ready to advance or disable guidance.
+- **"reward dropped below X%"**: Something went wrong or the stage changed → Re-evaluate the current stage.
+
+---
+
+## Task Information
+**Task Instruction:** {instruction}
+
+**Stage Descriptions (stages with guidance functions):**
+{stage_descriptions}
+
+**Keypoint ID to Object Mapping:**
+{keypoint_info}
+
+---
+
+## How to Decide
+
+**Step 1: Analyze what JUST happened (based on the trigger)**
+- If the gripper closed → The object was likely grasped.
+- If the gripper opened → The object was likely placed or released.
+- If the reward changed → The robot moved closer to or farther from the target.
+
+**Step 2: Determine what the NEXT chunk should do**
+- If the object was just grasped → The next chunk should TRANSPORT it (advance to the next stage).
+- If the object was just placed → Check if MORE stages remain or the task is DONE.
+- If still working on the current stage → Continue with the same stage.
+
+**Step 3: Decide if guidance is needed for the NEXT chunk**
+- **guidance: no** if:
+  - ALL stages are COMPLETED → output stage 0.
+  - The gripper is ALREADY CLOSE to the next target.
+  - The object is ALREADY GRASPED and ready for transport.
+  - The current stage goal is ACHIEVED; only natural policy behavior is needed.
+  
+- **guidance: yes** if:
+  - The gripper is FAR from the next target.
+  - Guidance is needed to direct the robot toward a specific object among multiple options.
+
+---
+
+## Images
+You will be provided with:
+1. **Initial Image (with keypoints)**: The starting state with numbered markers on objects.
+2. **Current Image**: The current robot state AFTER the trigger event.
+
+---
+
+## Output Format
+**Output EXACTLY three lines:**
+```
+stage N
+guidance: yes/no
+evidence: [what you see + why NEXT chunk needs this stage/guidance]
+```
+
+**Examples:**
+
+Trigger: "gripper closed"
+```
+stage 2
+guidance: yes
+evidence: The gripper just grasped the red cube (trigger); the NEXT chunk should transport it to the green tile; guidance is needed as the tile is far.
+```
+
+Trigger: "reward rose above 80%"
+```
+stage 1
+guidance: no
+evidence: The gripper is very close to the red cube; the NEXT chunk will complete the grasp; no guidance is needed.
+```
+
+Trigger: "gripper opened"
+```
+stage 0
+guidance: no
+evidence: The cube was placed on the green tile (trigger); all stages are complete; no further guidance is needed.
+```
+
+Trigger: "reward dropped below 60%"
+```
+stage 2
+guidance: yes
+evidence: The gripper with the cube drifted from the target; the NEXT chunk needs guidance to return to the green tile.
+```
+
+---
+
+## Current Query
+
+**Trigger Reason:** {trigger_reason}
+
+**Task:** {instruction}
+
+**Stages:**
+{stage_descriptions}
+
+**Keypoints:**
+{keypoint_info}
+
+**Images below (Initial with keypoints, then Current):**

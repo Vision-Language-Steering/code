@@ -1,0 +1,29 @@
+# @package policy
+# Policy Configuration
+#
+# Switch between policies by overriding:
+#   python main.py policy.type=pi05
+
+# Current policy type: diffusion or pi05
+type: pi05
+
+# ============================================================
+# Diffusion Policy (default)
+# ============================================================
+diffusion:
+  pretrained_path: /home/shuo/research/lerobot/outputs/train/2026-02-24/11-34-07_vls_maniskill_rotate/checkpoints/100000/pretrained_model
+  num_inference_steps: 100
+  n_obs_steps: 2
+  action_chunk_horizon: 16
+
+# ============================================================
+# PI05 Policy (for LIBERO)
+# ============================================================
+pi05:
+  pretrained_path: lerobot/pi05_libero_finetuned_v044
+  num_inference_steps: 10
+  action_chunk_horizon: 10
+
+
+# Note: pretrained_path and other params are read from policy.{type} section in main.py
+

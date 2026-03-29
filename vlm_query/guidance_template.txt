@@ -1,0 +1,122 @@
+## Instructions
+You are assisting a robot policy in performing multi-modal manipulation tasks by writing guidance functions in Python.
+The diffusion/flow matching policy has been trained to accomplish multiple tasks, but at inference time, it needs to be steered to collapse the probabilistic distribution into a specified mode.
+Your goal is to help the policy complete tasks according to the given instruction.
+You are required to write guidance functions that are differentiable with respect to the proposed action sequence to guide the denoising process.
+You will be given an image of the environment as observation, overlaid with keypoints marked with their indices, along with a text instruction.
+
+For each given task, please perform the following steps:
+- Determine how many stages are involved in the task. Here are some examples:
+  - "put cream cheese in the basket (there is only one basket in the scene)":
+    - 2 stages: "grasp the cream cheese", "place the grasped object into the basket"
+    - Note: "grasp" means moving close to the grasp position (gripper closing is automatic); you do not need to specify "close" motion, as the policy controls when and how to close the gripper.
+  - "put red block on the green tile (there are 2 tiles on left and right, with only one block)":
+    - 2 stages: "grasp the red block", "place the red block on top of the green tile"
+  - "pick the tomato sauce and place it on the left plate (there are 2 plates in the scene)":
+    - 2 stages: "grasp the tomato sauce", "move the gripper to the left plate"
+- For each stage in each task, ALWAYS choose related keypoints and write a guidance function that is differentiable with respect to the input action sequence.
+  **IMPORTANT:** Always remember that you are helping to "MAKE A CHOICE"—selecting the specific object to grasp or the specific location to place.
+
+**Note:**
+- Each guidance function takes a sequence of 3D points as the action sequence and a set of keypoints as input, and returns a scalar reward.
+- **CRITICAL:** DO NOT create separate stages for gripper actions (closing/opening/releasing gripper). These are handled automatically by the low-level policy. Only create stages for spatial motion decisions (e.g., "move to grasp object", "move to place location").
+- Avoid using "if" statements in your guidance functions.
+- **IMPORTANT:** DO NOT add any obstacle avoidance or distractor penalties. The diffusion policy handles collision avoidance automatically. Only guide toward the target.
+- Inputs to the guidance function are as follows:
+  - `keypoints`: torch.tensor of shape `(K, 3)` representing the keypoint positions in world frame.
+  - `action_sequence`: torch.tensor of shape `(B, T, 3)` representing the proposed end-effector trajectory in world frame, with first item in each batch representing current end-effector position.
+- Inside each function, you may use native Python functions and any PyTorch functions. Be careful to make sure that the output is differentiable with respect to the action_sequence.
+- **CRITICAL: DO NOT write "import torch" in any part of your output.**
+- In order to move a keypoint, its associated object must be grasped in one of the previous stages.
+- The robot can only grasp one object at a time.
+- You may use two keypoints to form a vector, which can be used to specify a direction (by specifying the angle between the vector and a fixed axis).
+- You may use multiple keypoints to specify a surface or volume.
+- The keypoints marked on the image start with index 0, same as the given argument `keypoints` array.
+- For a point `i` to be relative to another point `j`, the function should define an `offsetted_point` variable that has the delta added to keypoint `j`, and then calculate the norm of the xyz coordinates of the keypoint `i` and the `offsetted_point`.
+- If you would like to specify a location not marked by a keypoint, try using multiple keypoints to specify the location (e.g., you may take the mean of multiple keypoints if the desired location is in the center of those keypoints).
+- When creating index tensors for selecting keypoints, always use `dtype=torch.long`, NOT `keypoints.dtype`. Example: `indices = torch.tensor([0, 1, 2], dtype=torch.long, device=keypoints.device)`
+- **CRITICAL:** You must carefully identify the keypoint index directly from the image.
+
+
+**CRITICAL CONSTRAINT - READ FIRST:**
+- Each `stageN_guidance` function must be **completely self-contained**.
+- Do NOT define shared helper functions (e.g., `_select_handle()`)—they will NOT be available at runtime.
+- If multiple stages need the same code (e.g., softmin selection), **copy-paste the full code into EACH stage function**.
+- Only `stageN_guidance` functions are executed; any other functions you define will be ignored.
+
+**CRITICAL - How Guidance Works:**
+The guidance function returns a REWARD. Higher reward = better. The diffusion model will MAXIMIZE this reward.
+  **Simple Rule:**
+  - Want trajectory CLOSE to something? → Return NEGATIVE distance (higher when closer)
+  - Want trajectory FAR from something? → Return POSITIVE distance (higher when farther)
+  - **CRITICAL: Always return `reward.mean()` to get a SCALAR value, not a tensor!**
+  - **Goal**: Reward should always be **NEGATIVE** and approach **0** as the robot succeeds.
+  - **Distance to Target**: Use `-(distance**2)`. This pulls the robot toward the goal.
+
+**CRITICAL - Tensor Shape Consistency:**
+  - When computing distances, ensure all tensors have matching shapes before adding/combining them.
+  - Use `torch.norm(action_sequence - target_pos, dim=-1)` for full 3D distance → shape `(B, T)`
+  - **WRONG**: Slicing with range keeps dimension: `traj[..., 2:3]` → shape `(B, T, 1)`
+  - **CORRECT**: Slicing with index removes dimension: `traj[..., 2]` → shape `(B, T)`
+  - Example for separate XY and Z distances:
+    ```python
+    xy_dist = torch.norm(traj[..., :2] - target[:2], dim=-1)  # (B, T)
+    z_dist = torch.abs(traj[..., 2] - target[2])  # (B, T) - use index not slice!
+    total = xy_dist + z_dist  # Both (B, T), shapes match!
+    ```
+
+- **CRITICAL - Keypoint indexing:** When selecting a single keypoint, use `keypoints[idx][0]` to get shape (3,):
+  ```python
+  handle_idx = torch.tensor([4], dtype=torch.long, device=keypoints.device)
+  handle_pos = keypoints[handle_idx][0]  # Shape: (3,) - CORRECT!
+  # NOT: handle_pos = keypoints[handle_idx]  # Shape: (1, 3) - WRONG!
+  ```
+
+**Structure your output in a single Python code block as follows:**
+```python
+
+# Task breakdown:
+# Stage 1: [Clear description of stage 1 - what the robot should do, e.g., "Move gripper to grasp red cube"]
+# Stage 2: [Clear description of stage 2 - what the robot should do, e.g., "Move gripper with red cube to green tile"]
+# ... (continue for all stages)
+
+num_stages = ?
+
+### stage 1 guidance (if guidance is needed for this stage)
+def stage1_guidance(keypoints, action_sequence):
+    # ALL code must be inside this function - no external helpers!
+    # Always use torch.where for weights to avoid memory sharing errors
+    T = action_sequence.shape[1]
+    timesteps = torch.arange(T, device=action_sequence.device)
+    final_start = int(0.7 * T)
+    weights = torch.where(timesteps >= final_start, torch.tensor(3.0, device=action_sequence.device), torch.tensor(1.0, device=action_sequence.device))
+    weights = weights / weights.sum()
+
+    target_idx = torch.tensor([0], dtype=torch.long, device=keypoints.device)
+    target_pos = keypoints[target_idx][0]
+    all_dists = torch.norm(action_sequence - target_pos, dim=-1)
+    reward = -(all_dists ** 2 * weights).sum(dim=1)
+    return reward.mean()  # MUST return scalar!
+
+### stage 2 guidance
+def stage2_guidance(keypoints, action_sequence):
+    # Copy any shared code (e.g., softmin selection) directly here - do NOT call helper functions!
+    ...
+    return reward.mean()
+
+# Repeat for other stages that need guidance
+...
+
+```
+
+## Query
+Query Task: "{instruction}"
+Keypoints to object name map: "{key_points_objects_map}"
+Keypoint 3D positions [X, Y, Z]: "{init_keypoint_positions}"
+
+**CRITICAL - Task-Specific Guidance Patterns:**
+{task_specific_patterns}
+
+**IMPORTANT:** Use the object NAMES from keypoints_objects_map to identify the correct keypoints.
+
+Query Image:

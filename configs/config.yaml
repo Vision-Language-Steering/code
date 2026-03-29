@@ -1,0 +1,72 @@
+# VLS Main Configuration
+#
+# Usage:
+#   python main.py                                                    # Default calvin
+#   python main.py backend.calvin.target_behavior=drawer_open         # CALVIN task
+#   python main.py backend=libero backend.libero.suite_name=libero_goal # LIBERO
+#   python main.py main.episode_num=50                                # Override params
+
+defaults:
+  - backend: libero              # Environment (calvin/libero/realworld)
+  - perception               # Perception modules
+  - policy                   # Policy config
+  - _self_
+
+# ============================================================
+# Global Settings
+# ============================================================
+device: cuda
+seed: 0
+
+# ============================================================
+# Main Experiment Settings
+# ============================================================
+main:
+  episode_num: 10  # if using libero, need to be divisible by the number of tasks in the suite(i.e. libero_goal_task has 10 tasks, so episode_num should be divisible by 10)
+  output_dir: ${hydra:run.dir}
+  cached_functions_dir: null
+  visualize_trajectory: false
+  debug_draw_trajectory: false
+  render: false
+  
+  # Steering parameters
+  use_guidance: false
+  use_vlm_stage_recognition: true  # Use Gemini to recognize current stage
+  vlm_query_limit: 50  # Max VLM queries per episode
+  use_diversity: true
+  sample_batch_size: 1
+  guide_scale: 80.0
+  diversity_scale: 20.0
+  start_ratio: None
+  MCMC_steps: 4
+
+  sigmoid_k: 25.0
+  sigmoid_x0: 0.75
+  
+  # FKD (Feynman-Kac Diffusion)
+  use_fkd: true
+  fkd:
+    potential_type: max
+    lmbda: 10.0
+    adaptive_resampling: true
+    resample_frequency: 5
+
+# ============================================================
+# Experiment Tracking
+# ============================================================
+experiment:
+  name: ${backend.backend}
+  tags:
+    - ${backend.backend}
+
+# ============================================================
+# Hydra Settings
+# ============================================================
+hydra:
+  run:
+    dir: outputs/${experiment.name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/${experiment.name}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false

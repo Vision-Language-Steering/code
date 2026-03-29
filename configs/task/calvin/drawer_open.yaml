@@ -1,0 +1,22 @@
+# Task: Open Drawer (CALVIN)
+# @package _global_
+
+task:
+  name: drawer_open
+  backend: calvin
+
+main:
+  instruction: "open the drawer"
+
+backend:
+  calvin:
+    target_behavior: drawer_open
+    scene_cfg:
+      objects:
+        fixed_objects:
+          table:
+            joints:
+              base__drawer: {initial_state: 0.0}
+
+gemini_grounding:
+  default_objects: [drawer handle, drawer interior]

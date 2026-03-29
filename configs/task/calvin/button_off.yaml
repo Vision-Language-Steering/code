@@ -1,0 +1,22 @@
+# Task: Turn Off LED (CALVIN)
+# @package _global_
+
+task:
+  name: button_off
+  backend: calvin
+
+main:
+  instruction: "turn off the LED by pressing the button"
+
+backend:
+  calvin:
+    target_behavior: turn_off_led
+    scene_cfg:
+      objects:
+        fixed_objects:
+          table:
+            buttons:
+              base__button: {initial_state: 1, effect: led}
+
+gemini_grounding:
+  default_objects: [button, LED light]

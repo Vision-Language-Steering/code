@@ -1,0 +1,22 @@
+# Task: Push Door Left (CALVIN)
+# @package _global_
+
+task:
+  name: door_left
+  backend: calvin
+
+main:
+  instruction: "push the door to the left"
+
+backend:
+  calvin:
+    target_behavior: move_slider_left
+    scene_cfg:
+      objects:
+        fixed_objects:
+          table:
+            joints:
+              base__slide: {initial_state: 0.0}
+
+gemini_grounding:
+  default_objects: [sliding door, door track]

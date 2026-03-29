@@ -1,0 +1,100 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+egss/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+pytest_cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / IDE
+.idea/
+.vscode/
+*.code-workspace
+.cursor/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# ML / training artifacts
+wandb/
+lightning_logs/
+runs/
+checkpoints/
+outputs/
+tensorboard/
+tb_logs/
+experiments/
+artifacts/
+
+# Caches (DL/ML tools)
+.huggingface/
+transformers_cache/
+torch_cache/
+torch_extensions/
+.cache/
+cache/
+
+# Environment files
+.env
+.env.*
+
+# Results
+results/
+
+# Output directory
+output/

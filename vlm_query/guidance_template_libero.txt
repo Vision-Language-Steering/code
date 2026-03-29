@@ -1,0 +1,55 @@
+- LIBERO primarily consists of simple pick-and-place tasks and occasional drawer/cabinet opening tasks.
+
+**IMPORTANT - World Frame Clarification:**
+- Given the input image, the right direction is +Y axis, towards camera is +X direction, and upper is +Z axis
+
+**CRITICAL: For pick-and-place tasks, if the robot needs to pick up objects from above, assign a higher reward function weight to the X-Y coordinates.**
+
+**CRITICAL - KEYPOINT SELECTION RULE (VERY IMPORTANT!):**
+- You MUST directly identify the correct keypoint index by LOOKING AT THE IMAGE, NOT by writing code to calculate/compute which keypoint is correct!
+- **WRONG approach**: Writing softmin/softmax code to "select" between multiple candidate keypoints based on distance calculations
+- **CORRECT approach**: Look at the image, identify which keypoint (by its labeled number) corresponds to the target object, and hardcode that index directly
+- The keypoint indices are clearly labeled on the image with RED numbers - USE YOUR VISION to identify them!
+
+**EXAMPLE - CORRECT vs WRONG keypoint selection:**
+
+Task: "Pick the bowl that is on the cabinet" (Image shows: bowl at keypoint 0 is on table, bowl at keypoint 1 is on cabinet)
+
+WRONG - Computing/calculating which bowl:
+```python
+def stage1_guidance(keypoints, action_sequence):
+    # WRONG: Writing code to compute which bowl is on cabinet
+    cabinet_center = keypoints[torch.tensor([7,8,9], ...)].mean(dim=0)
+    bowl_dists = torch.norm(keypoints[:2, :2] - cabinet_center[:2], dim=-1)
+    bowl_weights = torch.softmax(-bowl_dists * 50, dim=0)  # DON'T DO THIS!
+    target_pos = (keypoints[:2] * bowl_weights.unsqueeze(-1)).sum(dim=0)
+    ...
+```
+
+CORRECT - Directly identifying from image:
+```python
+def stage1_guidance(keypoints, action_sequence):
+    # CORRECT: I looked at the image and saw keypoint 1 is the bowl on the cabinet
+    target_idx = torch.tensor([1], dtype=torch.long, device=keypoints.device)
+    target_pos = keypoints[target_idx][0]  # Directly use keypoint 1
+    ...
+```
+**CRITICAL: After identifying the correct keypoint visually, hardcode its index directly: `target_idx = torch.tensor([N], dtype=torch.long, device=keypoints.device)`
+
+
+**CRITICAL: Task specific rules:**
+- **CRITICAL: For scene with pick something into basket, you do not need to create stage 2 reward function, since we do not need to make decision here, just return 0.
+- **CRITICAL: For scene with something and place it in the back compartment of the caddy, you do not need to create stage 2 reward function, since we do not need to make decision here, just return 0.
+- "on the top of the wooden cabinet" means on the top surface of the whole cabinet, not in the top drawer!
+- "next to the plate" - LOOK at the image and identify which object is visually next to the plate, then use that keypoint index
+- "on the left/right" - LOOK at the image and identify which object is on the left/right side
+- For "put something on rack", just return 0 for stage2, policy knows how to put.
+
+- **CRITICAL: Make sure to carefully distinguish "the bowl on top of cabinet" and "the bowl in the top drawer of cabinet" !!!
+- Take care of which bowl is NOT between A and B, look at keypoint-object map to choose the right one!
+
+**Task breakdown format - include identified keypoint indices:**
+```
+# Stage 1: Move gripper to grasp bowl (keypoint 1) which I can see is on the cabinet
+# Stage 2: Move gripper with bowl to plate (keypoints 4,5)
+```

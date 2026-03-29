@@ -1,0 +1,540 @@
+## CALVIN Environment - Object-to-Task Semantic Mapping
+When selecting keypoints, use the correct object for each task type:
+- **Drawer tasks** (open/close drawer): Use keypoints labeled "drawer handle" and "drawer interior"
+- **Door tasks** (open/close door): Use keypoints labeled "sliding handle"
+- **Switch tasks** (turn on/off switch): Use keypoints labeled "slider handle" or "sliding handle" (labels can be swapped in detection)
+- **Button tasks** (push button): Use keypoints labeled "round black button", "black button", "black switch", or "button" (prefer lower-Z candidates if multiple exist - the tabletop button is lower)
+- **Cube/Block tasks** (grasp/push cube): Use keypoints with color names like "red block", "blue block", etc.
+
+**IMPORTANT:** Do NOT confuse these objects! The "slider handle" is for the SWITCH, not the drawer. The "drawer handle" is specifically for drawer operations.
+
+---
+
+## Task Examples and Stage Counts
+
+**IMPORTANT: Do NOT create separate stages for "close gripper" or "release gripper" - these are handled automatically by the policy.**
+
+- "close the drawer" → **3 stages**: approach handle, push inward, retract
+- "open the drawer" → **3 stages**: approach handle, pull outward, retract
+- "move the door to the left/right" → **3 stages**: approach sliding handle, slide door, retract
+- "turn on/off the switch" → **2 stages**: approach switch, slide switch
+- "push the button" → **2 stages**: approach button from above, press down
+- "push the [color] cube" → **2 stages**: approach cube, push in +X direction
+
+**IMPORTANT: Even if there is only ONE target object, you MUST still write a guidance function.** The diffusion policy doesn't know which object to interact with - you must guide it!
+
+---
+
+## Detailed Code Patterns
+
+### DRAWER TASKS (open/close) — use "drawer handle" and "drawer interior" keypoints
+
+**Direction Logic:**
+- **CLOSE drawer**: Push direction = `(interior_pos - handle_pos)` normalized (toward interior)
+- **OPEN drawer**: Pull direction = `(handle_pos - interior_pos)` normalized (away from interior)
+
+**Stage 1 - Approach & Settle at Handle:**
+```python
+def stage1_guidance(keypoints, action_sequence):
+    handle_idx = torch.tensor([0], dtype=torch.long, device=keypoints.device)  # "drawer handle"
+    interior_idx = torch.tensor([1], dtype=torch.long, device=keypoints.device)  # "drawer interior"
+    handle_pos = keypoints[handle_idx][0]  # (3,)
+    interior_pos = keypoints[interior_idx][0]  # (3,)
+
+    # Compute approach direction (same as push/pull direction)
+    # For CLOSE: approach_dir = interior_pos - handle_pos
+    # For OPEN: approach_dir = handle_pos - interior_pos
+    approach_dir = interior_pos - handle_pos
+    approach_dir = approach_dir / (torch.norm(approach_dir) + 1e-6)
+
+    # Pre-grasp position slightly outside the handle
+    pregrasp_offset = 0.03
+    pregrasp_pos = handle_pos - pregrasp_offset * approach_dir
+
+    # Weight final timesteps more heavily (3x for last 30%)
+    T = action_sequence.shape[1]
+    weights = torch.ones(T, device=action_sequence.device)
+    final_start = int(0.7 * T)
+    weights[final_start:] = 3.0
+    weights = weights / weights.sum()
+
+    all_dists = torch.norm(action_sequence - pregrasp_pos, dim=-1)  # (B, T)
+    weighted_dists = all_dists * weights.unsqueeze(0)
+    approach_reward = -(weighted_dists ** 2).sum(dim=1)
+
+    # Strong settle reward for ending at handle (2.0x)
+    final_dist = torch.norm(action_sequence[:, -1, :] - handle_pos, dim=-1)
+    settle_reward = -(final_dist ** 2) * 2.0
+
+    reward = approach_reward + settle_reward
+    return reward.mean()
+```
+
+**Stage 2 - Push (Close) with Contact-Anchored Motion:**
+```python
+def stage2_guidance(keypoints, action_sequence):
+    handle_idx = torch.tensor([0], dtype=torch.long, device=keypoints.device)
+    interior_idx = torch.tensor([1], dtype=torch.long, device=keypoints.device)
+    handle_pos = keypoints[handle_idx][0]
+    interior_pos = keypoints[interior_idx][0]
+
+    # Push direction is handle -> interior (for CLOSE)
+    # For OPEN: use handle_pos - interior_pos instead
+    push_direction = interior_pos - handle_pos
+    push_direction = push_direction / (torch.norm(push_direction) + 1e-6)
+
+    start_pos = action_sequence[:, 0, :]  # (B, 3)
+    final_pos = action_sequence[:, -1, :]  # (B, 3)
+
+    # REWARD 1: Total displacement along push axis
+    total_displacement = final_pos - start_pos
+    push_progress = torch.sum(total_displacement * push_direction, dim=-1)
+    motion_reward = push_progress
+
+    # REWARD 2: Contact anchoring - first 20% must stay close to handle (3.0x)
+    T = action_sequence.shape[1]
+    contact_steps = max(3, int(0.2 * T))
+    initial_positions = action_sequence[:, :contact_steps, :]
+    initial_dist_to_handle = torch.norm(initial_positions - handle_pos, dim=-1)
+    contact_penalty = -(initial_dist_to_handle ** 2).mean(dim=1) * 3.0
+
+    # REWARD 3: Anti-backtracking along push axis (2.0x)
+    offset_from_start = action_sequence - start_pos.unsqueeze(1)
+    along_push_all = torch.sum(offset_from_start * push_direction, dim=-1)
+    cummax_push = torch.cummax(along_push_all, dim=1)[0]
+    backtrack = cummax_push - along_push_all
+    backtrack_penalty = -(backtrack ** 2).mean(dim=1)
+
+    # REWARD 4: Perpendicular drift penalty
+    perp_offset = offset_from_start - along_push_all.unsqueeze(-1) * push_direction
+    align_reward = -(torch.norm(perp_offset, dim=-1) ** 2).mean(dim=1)
+
+    reward = motion_reward + contact_penalty + 2.0 * backtrack_penalty + align_reward
+    return reward.mean()
+```
+
+**Stage 3 - Retract (move sideways/upward, NOT along drawer axis):**
+```python
+def stage3_guidance(keypoints, action_sequence):
+    handle_idx = torch.tensor([0], dtype=torch.long, device=keypoints.device)
+    interior_idx = torch.tensor([1], dtype=torch.long, device=keypoints.device)
+    handle_pos = keypoints[handle_idx][0]
+    interior_pos = keypoints[interior_idx][0]
+
+    push_direction = interior_pos - handle_pos
+    push_direction = push_direction / (torch.norm(push_direction) + 1e-6)
+
+    start_pos = action_sequence[:, 0, :]
+    final_pos = action_sequence[:, -1, :]
+    movement = final_pos - start_pos
+
+    # PENALIZE motion along drawer axis (either push or pull - avoid reopening)
+    along_drawer = torch.sum(movement * push_direction, dim=-1)
+    drawer_axis_penalty = -(along_drawer ** 2)
+
+    # REWARD upward motion (0.5x)
+    upward_reward = movement[:, 2]
+
+    # REWARD moving away from handle (0.3x)
+    dist_from_handle = torch.norm(final_pos - handle_pos, dim=-1)
+    retreat_reward = dist_from_handle
+
+    reward = drawer_axis_penalty + 0.5 * upward_reward + 0.3 * retreat_reward
+    return reward.mean()
+```
+
+**For OPEN drawer:** Same 3 stages, but reverse the direction:
+- Stage 1: approach from pull direction (`pregrasp_pos = handle_pos + pregrasp_offset * pull_direction`)
+- Stage 2: `pull_direction = handle_pos - interior_pos` (opposite of close)
+- Stage 3: retract (same logic)
+
+---
+
+### DOOR TASKS (sliding door) — use "sliding handle" keypoints
+
+**Direction Logic:**
+- **Move door LEFT / Close door**: Slide direction = `[-1.0, 0.0, 0.0]` (negative X)
+- **Move door RIGHT / Open door**: Slide direction = `[1.0, 0.0, 0.0]` (positive X)
+
+**CRITICAL - Position-Based Handle Filtering:**
+The sliding door can only be on ONE side at a time. Filter "sliding handle" keypoints by their X position:
+- **DOOR LEFT** (door starts on RIGHT side): Only use handles with **X > 0.0**
+- **DOOR RIGHT** (door starts on LEFT side): Only use handles with **X < 0.15**
+Check the keypoint 3D positions and EXCLUDE any "sliding handle" keypoints on the wrong side — they are likely cabinet handles, not door handles.
+
+**CRITICAL - Softmin Handle Selection:**
+If multiple "sliding handle" keypoints remain after filtering, use softmin to select the closest one per sample. Copy the softmin code into ALL 3 stage functions.
+
+**Stage 1 - Approach with Softmin + Grip Offset:**
+```python
+def stage1_guidance(keypoints, action_sequence):
+    # --- Softmin selection among sliding handles ---
+    door_handle_indices = torch.tensor([X, Y], dtype=torch.long, device=keypoints.device)  # Replace with actual indices
+    candidate_handles = keypoints[door_handle_indices]  # (H, 3)
+
+    current_ee = action_sequence[:, 0, :]  # (B, 3)
+    if candidate_handles.shape[0] == 1:
+        door_handle_pos = candidate_handles[0]  # (3,)
+    else:
+        dists = torch.norm(current_ee.unsqueeze(1) - candidate_handles.unsqueeze(0), dim=-1)  # (B, H)
+        softmin_weights = torch.softmax(-dists * 10.0, dim=-1)  # (B, H)
+        door_handle_pos = torch.einsum('bh,hd->bd', softmin_weights, candidate_handles)  # (B, 3)
+
+    # Grip offset: approach from opposite side of slide direction for better engagement
+    # DOOR LEFT (slide -X): grip_offset = [+0.02, 0, 0] (approach from right)
+    # DOOR RIGHT (slide +X): grip_offset = [-0.02, 0, 0] (approach from left)
+    grip_offset = torch.tensor([0.02, 0.0, 0.0], device=keypoints.device)  # For DOOR LEFT
+    if door_handle_pos.dim() == 1:
+        door_handle_pos = door_handle_pos + grip_offset
+    else:
+        door_handle_pos = door_handle_pos + grip_offset.unsqueeze(0)
+
+    # Weight final timesteps heavily (5x for last 40%) for precise approach
+    T = action_sequence.shape[1]
+    weights = torch.ones(T, device=action_sequence.device)
+    final_start = int(0.6 * T)
+    weights[final_start:] = 5.0
+    weights = weights / weights.sum()
+
+    if door_handle_pos.dim() == 1:
+        all_dists = torch.norm(action_sequence - door_handle_pos, dim=-1)
+        final_dist = torch.norm(action_sequence[:, -1, :] - door_handle_pos, dim=-1)
+    else:
+        all_dists = torch.norm(action_sequence - door_handle_pos.unsqueeze(1), dim=-1)
+        final_dist = torch.norm(action_sequence[:, -1, :] - door_handle_pos, dim=-1)
+
+    weighted_dists = all_dists * weights.unsqueeze(0)
+    approach_reward = -(weighted_dists ** 2).sum(dim=1)
+    settle_reward = -(final_dist ** 2) * 5.0  # Strong settle for precise grip
+
+    reward = approach_reward + settle_reward
+    return reward.mean()
+```
+
+**Stage 2 - Slide Door (copy softmin selection, NO grip offset):**
+```python
+def stage2_guidance(keypoints, action_sequence):
+    # --- SAME softmin handle selection as stage 1 (without grip_offset) ---
+    door_handle_indices = torch.tensor([X, Y], dtype=torch.long, device=keypoints.device)
+    candidate_handles = keypoints[door_handle_indices]
+
+    current_ee = action_sequence[:, 0, :]
+    if candidate_handles.shape[0] == 1:
+        door_handle_pos = candidate_handles[0]
+    else:
+        dists = torch.norm(current_ee.unsqueeze(1) - candidate_handles.unsqueeze(0), dim=-1)
+        softmin_weights = torch.softmax(-dists * 10.0, dim=-1)
+        door_handle_pos = torch.einsum('bh,hd->bd', softmin_weights, candidate_handles)  # (B, 3)
+
+    # Slide direction: -X for LEFT, +X for RIGHT
+    slide_direction = torch.tensor([-1.0, 0.0, 0.0], device=keypoints.device)  # -X for door_left
+
+    start_pos = action_sequence[:, 0, :]
+    final_pos = action_sequence[:, -1, :]
+    total_displacement = final_pos - start_pos
+
+    # REWARD 1: Motion along slide axis
+    slide_progress = torch.sum(total_displacement * slide_direction, dim=-1)
+    motion_reward = slide_progress
+
+    # REWARD 2: Contact anchoring (3.0x)
+    T = action_sequence.shape[1]
+    contact_steps = max(3, int(0.2 * T))
+    initial_positions = action_sequence[:, :contact_steps, :]
+    if door_handle_pos.dim() == 1:
+        initial_dist = torch.norm(initial_positions - door_handle_pos, dim=-1)
+    else:
+        initial_dist = torch.norm(initial_positions - door_handle_pos.unsqueeze(1), dim=-1)
+    contact_penalty = -(initial_dist ** 2).mean(dim=1) * 3.0
+
+    # REWARD 3: Anti-backtracking (2.0x)
+    offset_from_start = action_sequence - start_pos.unsqueeze(1)
+    along_slide_all = torch.sum(offset_from_start * slide_direction, dim=-1)
+    cummax_slide = torch.cummax(along_slide_all, dim=1)[0]
+    backtrack = cummax_slide - along_slide_all
+    backtrack_penalty = -(backtrack ** 2).mean(dim=1)
+
+    # REWARD 4: YZ alignment
+    yz_offset = offset_from_start[:, :, 1:3]
+    align_reward = -(torch.norm(yz_offset, dim=-1) ** 2).mean(dim=1)
+
+    reward = motion_reward + contact_penalty + 2.0 * backtrack_penalty + align_reward
+    return reward.mean()
+```
+
+**Stage 3 - Retract (copy softmin selection):**
+```python
+def stage3_guidance(keypoints, action_sequence):
+    # --- SAME softmin handle selection ---
+    door_handle_indices = torch.tensor([X, Y], dtype=torch.long, device=keypoints.device)
+    candidate_handles = keypoints[door_handle_indices]
+
+    current_ee = action_sequence[:, 0, :]
+    if candidate_handles.shape[0] == 1:
+        door_handle_pos = candidate_handles[0]
+    else:
+        dists = torch.norm(current_ee.unsqueeze(1) - candidate_handles.unsqueeze(0), dim=-1)
+        softmin_weights = torch.softmax(-dists * 10.0, dim=-1)
+        door_handle_pos = torch.einsum('bh,hd->bd', softmin_weights, candidate_handles)
+
+    slide_direction = torch.tensor([-1.0, 0.0, 0.0], device=keypoints.device)
+
+    start_pos = action_sequence[:, 0, :]
+    final_pos = action_sequence[:, -1, :]
+    movement = final_pos - start_pos
+
+    # PENALIZE motion along slide axis (don't push door back)
+    along_slide = torch.sum(movement * slide_direction, dim=-1)
+    slide_axis_penalty = -(along_slide ** 2)
+
+    # REWARD upward motion (0.5x)
+    upward_reward = movement[:, 2]
+
+    # REWARD moving away from handle (0.3x)
+    if door_handle_pos.dim() == 1:
+        dist_from_handle = torch.norm(final_pos - door_handle_pos, dim=-1)
+    else:
+        dist_from_handle = torch.norm(final_pos - door_handle_pos, dim=-1)
+    retreat_reward = dist_from_handle
+
+    reward = slide_axis_penalty + 0.5 * upward_reward + 0.3 * retreat_reward
+    return reward.mean()
+```
+
+**For DOOR RIGHT:** Change `slide_direction` to `[1.0, 0.0, 0.0]` in stages 2 and 3, AND change `grip_offset` to `[-0.02, 0.0, 0.0]` in stage 1.
+
+---
+
+### SWITCH TASKS — use "slider handle" or "sliding handle" keypoints (NOT drawer handle!)
+
+**CRITICAL - Keypoint Selection:**
+1. Consider BOTH "slider handle" and "sliding handle" labels in keypoints_objects_map (labels can be swapped by detection)
+2. **FILTER:** Reject any candidate with **Z > 0.70** (too high — likely not the switch)
+3. Pick the **RIGHTMOST** candidate (highest X position)
+
+**Direction Logic:**
+- **TURN ON (slide switch down)**: Slide in **-X** direction
+- **TURN OFF (slide switch up)**: Slide in **+X** direction
+
+**Alternative for switch_off:** If keypoint detection is unreliable, the switch handle has a relatively fixed position in CALVIN at approximately `[0.30, 0.05, 0.59]`. You may hardcode this as a fallback instead of using keypoint lookup.
+
+**Stage 1 - Approach Switch:**
+```python
+def stage1_guidance(keypoints, action_sequence):
+    switch_idx = torch.tensor([X], dtype=torch.long, device=keypoints.device)  # slider handle
+    switch_pos = keypoints[switch_idx][0]  # (3,)
+
+    # Approach from slightly above (+Z)
+    approach_dir = torch.tensor([0.0, 0.0, 1.0], device=keypoints.device)
+    pregrasp_offset = 0.03
+    pregrasp_pos = switch_pos + pregrasp_offset * approach_dir
+
+    T = action_sequence.shape[1]
+    weights = torch.ones(T, device=action_sequence.device)
+    final_start = int(0.7 * T)
+    weights[final_start:] = 3.0
+    weights = weights / weights.sum()
+
+    all_dists = torch.norm(action_sequence - pregrasp_pos, dim=-1)
+    weighted_dists = all_dists * weights.unsqueeze(0)
+    approach_reward = -(weighted_dists ** 2).sum(dim=1)
+
+    final_dist = torch.norm(action_sequence[:, -1, :] - switch_pos, dim=-1)
+    settle_reward = -(final_dist ** 2) * 2.0
+
+    reward = approach_reward + settle_reward
+    return reward.mean()
+```
+
+**Stage 2 - Slide Switch:**
+```python
+def stage2_guidance(keypoints, action_sequence):
+    switch_idx = torch.tensor([X], dtype=torch.long, device=keypoints.device)
+    switch_pos = keypoints[switch_idx][0]  # (3,)
+
+    # Slide direction: -X for ON, +X for OFF
+    slide_direction = torch.tensor([-1.0, 0.0, 0.0], device=keypoints.device)  # -X for turn on
+
+    offset_from_switch = action_sequence - switch_pos  # (B, T, 3)
+    along_slide_all = torch.sum(offset_from_switch * slide_direction, dim=-1)  # (B, T)
+
+    # Reward deepest slide
+    deepest_slide = along_slide_all.max(dim=1)[0]
+    slide_reward = deepest_slide
+
+    # Anti-backtracking (2.0x)
+    cummax_slide = torch.cummax(along_slide_all, dim=1)[0]
+    backtrack = cummax_slide - along_slide_all
+    backtrack_penalty = -(backtrack ** 2).mean(dim=1)
+
+    # Stay aligned with switch (Y and Z)
+    yz_offset = offset_from_switch[:, :, 1:3]
+    align_reward = -(torch.norm(yz_offset, dim=-1) ** 2).mean(dim=1)
+
+    reward = slide_reward + 2.0 * backtrack_penalty + align_reward
+    return reward.mean()
+```
+
+---
+
+### BUTTON TASKS — use "round black button", "black button", "black switch", or "button" keypoints
+
+**CRITICAL:** If multiple button keypoints exist, prefer the one with **LOWER Z** (tabletop button is lower than panel elements).
+
+**Stage 1 - Approach from Above (+Z):**
+```python
+def stage1_guidance(keypoints, action_sequence):
+    button_indices = torch.tensor([X, Y], dtype=torch.long, device=keypoints.device)
+    candidate_buttons = keypoints[button_indices]
+    z_vals = candidate_buttons[:, 2]
+    button_pos = candidate_buttons[torch.argmin(z_vals)]  # (3,) — lower Z = tabletop
+
+    approach_dir = torch.tensor([0.0, 0.0, 1.0], device=keypoints.device)
+    pregrasp_offset = 0.03
+    pregrasp_pos = button_pos + pregrasp_offset * approach_dir
+
+    T = action_sequence.shape[1]
+    weights = torch.ones(T, device=action_sequence.device)
+    final_start = int(0.7 * T)
+    weights[final_start:] = 3.0
+    weights = weights / weights.sum()
+
+    all_dists = torch.norm(action_sequence - pregrasp_pos, dim=-1)
+    weighted_dists = all_dists * weights.unsqueeze(0)
+    approach_reward = -(weighted_dists ** 2).sum(dim=1)
+
+    final_dist = torch.norm(action_sequence[:, -1, :] - button_pos, dim=-1)
+    settle_reward = -(final_dist ** 2) * 2.0
+
+    reward = approach_reward + settle_reward
+    return reward.mean()
+```
+
+**Stage 2 - Press with DEEPEST PRESS + DWELL + STRONG XY alignment:**
+```python
+def stage2_guidance(keypoints, action_sequence):
+    button_indices = torch.tensor([X, Y], dtype=torch.long, device=keypoints.device)
+    candidate_buttons = keypoints[button_indices]
+    z_vals = candidate_buttons[:, 2]
+    button_pos = candidate_buttons[torch.argmin(z_vals)]  # (3,)
+
+    push_direction = torch.tensor([0.0, 0.0, -1.0], device=keypoints.device)  # -Z downward
+
+    T = action_sequence.shape[1]
+    offset_from_button = action_sequence - button_pos  # (B, T, 3)
+
+    # REWARD 1: DEEPEST PRESS (1x) - max depth reached at any timestep
+    along_push_all = torch.sum(offset_from_button * push_direction, dim=-1)  # (B, T)
+    deepest_push = along_push_all.max(dim=1)[0]
+    push_reward = deepest_push
+
+    # REWARD 2: DWELL at bottom (2.0x) - last 30% should stay pressed
+    dwell_start = int(0.7 * T)
+    dwell_positions = along_push_all[:, dwell_start:]
+    dwell_reward = dwell_positions.mean(dim=1) * 2.0
+
+    # REWARD 3: STRONG XY alignment (50.0x) - penalize any XY drift from button
+    xy_offset = offset_from_button[:, :, 0:2]
+    xy_dist = torch.norm(xy_offset, dim=-1)  # (B, T)
+    weights = torch.ones(T, device=action_sequence.device)
+    weights[T // 2:] = 3.0
+    weights = weights / weights.sum()
+    weighted_xy_penalty = -((xy_dist ** 2) * weights.unsqueeze(0)).sum(dim=1) * 50.0
+
+    # REWARD 4: Contact anchoring (20.0x) - first 20% close in XY
+    contact_steps = max(3, int(0.2 * T))
+    initial_xy_dist = xy_dist[:, :contact_steps]
+    contact_penalty = -(initial_xy_dist ** 2).mean(dim=1) * 20.0
+
+    # REWARD 5: Anti-backtracking (5.0x) - don't bounce up after pressing
+    cummax_push = torch.cummax(along_push_all, dim=1)[0]
+    backtrack = cummax_push - along_push_all
+    backtrack_penalty = -(backtrack ** 2).mean(dim=1) * 5.0
+
+    reward = push_reward + dwell_reward + weighted_xy_penalty + contact_penalty + backtrack_penalty
+    return reward.mean()
+```
+
+---
+
+### CUBE/BLOCK TASKS — use keypoints with color names ("red block", "blue block", "pink cube", etc.)
+
+Use exactly **2 stages**: approach + push in **hardcoded +X direction**.
+
+**Stage 1 - Approach Cube:**
+```python
+def stage1_guidance(keypoints, action_sequence):
+    cube_idx = torch.tensor([X], dtype=torch.long, device=keypoints.device)  # Replace X with actual index
+    cube_pos = keypoints[cube_idx][0]  # (3,)
+
+    dists = torch.norm(action_sequence - cube_pos, dim=-1)  # (B, T)
+    approach_reward = -(dists ** 2).mean(dim=1)
+
+    return approach_reward.mean()
+```
+
+**Stage 2 - Push in +X Direction:**
+```python
+def stage2_guidance(keypoints, action_sequence):
+    cube_idx = torch.tensor([X], dtype=torch.long, device=keypoints.device)
+    cube_pos = keypoints[cube_idx][0]  # (3,)
+
+    # HARDCODED push direction: +X
+    push_direction = torch.tensor([1.0, 0.0, 0.0], device=keypoints.device)
+
+    offset_from_cube = action_sequence - cube_pos  # (B, T, 3)
+    along_push_all = torch.sum(offset_from_cube * push_direction, dim=-1)  # (B, T)
+
+    # Reward deepest push
+    deepest_push = along_push_all.max(dim=1)[0]
+    push_reward = deepest_push
+
+    # Anti-backtracking (2.0x)
+    cummax_push = torch.cummax(along_push_all, dim=1)[0]
+    backtrack = cummax_push - along_push_all
+    backtrack_penalty = -(backtrack ** 2).mean(dim=1)
+
+    # Stay aligned with cube during push (Y and Z)
+    yz_offset = offset_from_cube[:, :, 1:3]
+    align_reward = -(torch.norm(yz_offset, dim=-1) ** 2).mean(dim=1)
+
+    reward = push_reward + 2.0 * backtrack_penalty + align_reward
+    return reward.mean()
+```
+
+---
+
+## Quick Reference Summary
+
+**Drawer tasks** (use "drawer handle" + "drawer interior"):
+- 3 stages: approach → push/pull → retract
+- CLOSE: `push_dir = interior - handle`; OPEN: `pull_dir = handle - interior`
+- Contact-anchored motion: reward displacement, penalize first-20% drift, anti-backtrack
+- Retract: penalize motion along drawer axis, reward upward/away
+
+**Door tasks** (use "sliding handle" — filter by X position!):
+- 3 stages: approach (with grip_offset) → slide → retract
+- LEFT: `-X`; RIGHT: `+X`
+- Softmin handle selection in ALL 3 stages (copy-paste, no helpers!)
+- Grip offset ONLY in stage 1: LEFT → `[+0.02,0,0]`, RIGHT → `[-0.02,0,0]`
+- DISABLE obstacle avoidance for door tasks
+
+**Switch tasks** (use "slider handle" / "sliding handle" — filter Z < 0.70, pick rightmost):
+- 2 stages: approach → slide
+- ON: `-X`; OFF: `+X`
+- Switch_off fallback: hardcoded position `[0.30, 0.05, 0.59]`
+
+**Button tasks** (prefer LOWER-Z candidate among button keypoints):
+- 2 stages: approach from +Z → press -Z
+- Stage 2 has 5 reward components: push(1x) + dwell(2x) + xy_penalty(50x) + contact(20x) + backtrack(5x)
+
+**Cube/block tasks** (use color-named keypoints):
+- 2 stages: approach → push +X
+- Hardcoded +X push direction for all cube tasks
+
+**Contact-Anchored Pattern (drawer/door):**
+1. APPROACH: pre-grasp offset + weighted final timesteps + settle reward
+2. MOTION: reward `(final-start) · axis`, NOT `max((pos-handle) · axis)`
+3. CONTACT ANCHORING: penalize first 20% drifting from handle
+4. ANTI-BACKTRACK: `cummax` along motion axis
+5. NO OBSTACLE AVOIDANCE for drawer/door tasks

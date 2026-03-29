@@ -1,0 +1,31 @@
+# LIBERO/LIBERO-PRO Environment Configuration
+# @package backend
+
+backend: libero
+
+libero:
+  # Suite options: 
+  # Base LIBERO suites: libero_goal, libero_spatial, libero_object, libero_10
+  # LIBERO-PRO perturbed suites with language: libero_goal_lan, libero_spatial_lan, libero_object_lan, libero_10_lan
+  # LIBERO-PRO perturbed suites with task: libero_goal_task, libero_spatial_task, libero_object_task, libero_10_task
+  # LIBERO-PRO perturbed suites with object: libero_goal_object, libero_spatial_object, libero_object_object, libero_10_object
+  # LIBERO-PRO perturbed suites with swap: libero_goal_swap, libero_spatial_swap, libero_object_swap, libero_10_swap
+  
+  suite_name: libero_object
+  task_id: 0
+  camera_name: agentview_image, robot0_eye_in_hand_image
+  obs_type: pixels_agent_pos
+  render_mode: rgb_array
+  observation_width: 256  # Resolution for policy observation (low-res for speed)
+  observation_height: 256
+  visualization_width: 640  # Resolution for VLM/video (high-res for quality)
+  visualization_height: 640
+  init_states: true
+  num_steps_wait: 10
+  vlm_camera: agentview
+  
+  # Perturbation settings for OOD evaluation
+  auto_apply_perturbations: true
+  task_ids_filter:  null #[2, 6, 8] #[0, 2, 3, 4, 8] #= all tasks, or list like [0, 1, 2], we do not need this
+  
+ 

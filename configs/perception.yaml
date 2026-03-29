@@ -1,0 +1,62 @@
+# @package perception
+# Perception Modules Configuration
+
+# ============================================================
+# Keypoint Detector
+# ============================================================
+keypoint_detector:
+  num_candidates_per_mask: 5
+  min_dist_bt_keypoints: 0.05
+  max_mask_ratio: 0.5
+  device: ${device}
+  seed: ${seed}
+  
+  # Workspace bounds for filtering
+  bounds_min: [-1.0, -0.75, -0.1]
+  bounds_max: [1.00, 0.75, 1.2]
+  
+  # Feature extractor: dinov3_vitb16, dinov3_vitl16, dinov2_vits14, etc.
+  feature_extractor: dinov3_vitb16
+
+# ============================================================
+# VLM Agent (for guidance generation)
+# ============================================================
+vlm_agent:
+  base_url: null            # Set AZURE_OPENAI_BASE_URL env var (for Azure) or leave null for OpenAI
+  model: gpt-5.1           # Use gpt-4o, gpt-4, gpt-4-turbo, or gpt-3.5-turbo
+  api_key: null             # Set OPENAI_API_KEY env var (or AZURE_OPENAI_API_KEY for Azure)
+  temperature: 1.0
+  max_completion_tokens: 2000
+  query_template_dir: vlm_query/
+
+# ============================================================
+# SAM3 Segmentation (optional, disabled by default)
+# ============================================================
+sam3:
+  enabled: false            # SAM3 can't detect small objects well
+
+# ============================================================
+# Gemini Grounding (preferred for visual grounding)
+# ============================================================
+gemini_grounding:
+  enabled: true
+  api_key: null             # Set GOOGLE_API_KEY env var
+  model: gemini-3-flash-preview
+  
+  # Default objects to detect (overridden per task)
+  default_objects:
+    - drawer handle
+    - sliding handle
+    - slider handle
+    - black switch
+    - red cube
+    - blue cube
+    - pink cube
+
+# ============================================================
+# Gemini Stage Recognition (for real-time stage + guidance decisions)
+# ============================================================
+gemini:
+  api_key: null             # Set GOOGLE_API_KEY env var
+  model: gemini-3-flash-preview  # Fast model for real-time queries
+
