@@ -325,7 +325,14 @@ class Main:
             segmentation=segmentation,
             segment_id_to_name=segment_id_to_name
         )
-        
+
+        # Grounding-degradation ablation (E12): perturb keypoints once at grounding time.
+        # Noise persists through tracking, modeling a systematic grounding error.
+        noise_sigma = float(self.config.get('keypoint_noise_sigma', 0.0) or 0.0)
+        if noise_sigma > 0 and len(key_points) > 0:
+            key_points = np.asarray(key_points) + np.random.normal(0.0, noise_sigma, np.asarray(key_points).shape)
+            log.info(f"[Ablation] Added Gaussian noise sigma={noise_sigma}m to {len(key_points)} keypoints")
+
         # Register keypoints
         key_points_objects_map = self.keypoint_tracker.register_keypoints(
             key_points,
@@ -403,7 +410,29 @@ class Main:
         # Schmitt trigger on reward (only relevant when guidance is active)
         reward_rising = state['use_guidance'] and (prev_reward < upper_th and curr_reward >= upper_th)
         reward_falling = state['use_guidance'] and (prev_reward > lower_th and curr_reward <= lower_th)
-        
+
+        # Deterministic (VLM-free) stage switching ablation (E9): advance on gripper events,
+        # gate guidance with the same Schmitt thresholds, never query the VLM.
+        if self.config.get('stage_switch_mode', 'vlm') == 'gripper':
+            num_stages = len(self.guidance_fns) if hasattr(self, 'guidance_fns') else 1
+            if gripper_just_closed or gripper_just_opened:
+                new_stage = min(state['current_stage'] + 1, num_stages)
+                if new_stage != state['current_stage']:
+                    log.info(f"[DetStage] gripper event: stage {state['current_stage']} -> {new_stage}")
+                    self.policy.reset_stage()
+                    curr_reward = 0.0
+                    state['current_stage'] = new_stage
+                    state['use_guidance'] = True
+            if reward_rising:
+                log.info(f"[DetStage] reward rose above {upper_th:.0%}: guidance off")
+                state['use_guidance'] = False
+            elif reward_falling:
+                log.info(f"[DetStage] reward dropped below {lower_th:.0%}: guidance on")
+                state['use_guidance'] = True
+            state['prev_norm_reward'] = curr_reward
+            state['prev_gripper_open'] = curr_gripper_open
+            return state
+
         # Build trigger reason (priority: gripper > reward > chunk interval > periodic)
         trigger_reason = None
         if gripper_just_closed:
@@ -477,9 +506,12 @@ class Main:
             
             # Perform task preparation with error handling
             episode_error = False
+            self._prep_seconds = 0.0
             if self.config.get("use_guidance", True):
                 try:
+                    _t_prep = time.perf_counter()
                     self.perform_task_for_episode(episode_dir)
+                    self._prep_seconds = time.perf_counter() - _t_prep
                 except Exception as e:
                     log.error(f"Episode {episode+1} preparation failed: {e}")
                     episode_error = True
@@ -569,7 +601,11 @@ class Main:
             'use_guidance': use_guidance,
             'vlm_query_count': 0,
         }
-        
+
+        # E2 latency instrumentation (timing only, no behavior change)
+        timing_log = []
+        stage_update_s = 0.0
+
         while not done:
             generate_new_chunk = (action_executed == 0)
 
@@ -579,8 +615,10 @@ class Main:
                 
                 # Update stage recognition
                 gripper_val = self._get_gripper_value(action_chunk, action_executed)
+                _t_stage = time.perf_counter()
                 stage_state = self._update_stage(stage_state, gripper_val, UPPER_THRESHOLD, LOWER_THRESHOLD)
-                
+                stage_update_s = time.perf_counter() - _t_stage
+
                 current_stage = stage_state['current_stage']
                 use_guidance = stage_state['use_guidance']
                 current_guidance_fns = self.guidance_fns.get(current_stage, []) if use_guidance else None
@@ -599,6 +637,7 @@ class Main:
             sigmoid_k = self.config.get("sigmoid_k", 12.0)
             sigmoid_x0 = self.config.get("sigmoid_x0", 0.7)
             
+            _t_sel = time.perf_counter()
             action_chunk = self.policy.select_action(
                 observation,
                 generate_new_chunk=generate_new_chunk,
@@ -617,7 +656,18 @@ class Main:
                 fkd_config=OmegaConf.to_container(self.config.get("fkd", {}), resolve=True) if self.config.get("fkd") else None,
                 global_step=global_steps,
                 current_stage=current_stage,
+                steering_mode=self.config.get("steering_mode", "vls"),
             )
+            _sel_s = time.perf_counter() - _t_sel
+            timing_log.append({
+                'step': global_steps,
+                'new_chunk': bool(generate_new_chunk),
+                'guidance': bool(use_guidance),
+                'stage': int(current_stage),
+                'select_action_s': round(_sel_s, 4),
+                'stage_update_s': round(stage_update_s if generate_new_chunk else 0.0, 4),
+            })
+            stage_update_s = 0.0
 
             if hasattr(self.adapter, 'env_postprocessor'):
                 action_transition = {"action": action_chunk}
@@ -696,6 +746,16 @@ class Main:
                 self.video_recorder.save_video(save_path=video_path, success=is_success, behavior_name=behavior_name)
                 break
         
+        # Persist E2 timing data
+        try:
+            with open(os.path.join(episode_dir, 'timing.json'), 'w') as f:
+                json.dump({
+                    'prep_seconds': getattr(self, '_prep_seconds', 0.0),
+                    'steps': timing_log,
+                }, f, indent=1)
+        except Exception as e:
+            log.warning(f"Failed to save timing.json: {e}")
+
         log.info(f"Episode {episode+1} finished, success: {info.get('success', False)}, steps: {global_steps}")
     
     def _plot_behavior_stats(self):

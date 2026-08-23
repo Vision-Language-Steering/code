@@ -47,13 +47,20 @@ class VLMAgent:
         # Load prompt templates with base + environment-specific logic
         template_dir = self.config["query_template_dir"]
         base_template_path = os.path.join(template_dir, 'guidance_template.txt')
-        
+
+        # Optional override of the task_specific_patterns source (for ablations):
+        #   patterns_file: "none" -> generic prompt with no env-specific patterns
+        #   patterns_file: "<file>" -> use that file inside query_template_dir
+        patterns_override = self.config.get("patterns_file")
+
         # Determine environment-specific template
-        if self.env_type:
+        if patterns_override and patterns_override != "none":
+            env_template_file = patterns_override
+        elif self.env_type:
             env_template_file = f"guidance_template_{self.env_type}.txt"
         else:
             env_template_file = self.config.get("prompt_template", "guidance_template_libero.txt")
-        
+
         env_template_path = os.path.join(template_dir, env_template_file)
         
         # Load base template
@@ -65,7 +72,10 @@ class VLMAgent:
             base_template = "{task_specific_patterns}"
             
         # Load environment-specific notes/patterns
-        if os.path.exists(env_template_path):
+        if patterns_override == "none":
+            env_notes = "(No specific patterns for this environment)"
+            log.info("patterns_file=none: running with generic prompt (no task-specific patterns)")
+        elif os.path.exists(env_template_path):
             with open(env_template_path, 'r') as f:
                 env_notes = f.read()
         else:

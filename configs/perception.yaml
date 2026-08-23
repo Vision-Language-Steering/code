@@ -23,11 +23,14 @@ keypoint_detector:
 # ============================================================
 vlm_agent:
   base_url: null            # Set AZURE_OPENAI_BASE_URL env var (for Azure) or leave null for OpenAI
-  model: gpt-5.1           # Use gpt-4o, gpt-4, gpt-4-turbo, or gpt-3.5-turbo
+  model: gpt-5.6-terra      # Azure deployment name (rebuttal runs; was gpt-5.1 for paper runs)
   api_key: null             # Set OPENAI_API_KEY env var (or AZURE_OPENAI_API_KEY for Azure)
   temperature: 1.0
-  max_completion_tokens: 2000
+  max_completion_tokens: 6000  # headroom for reasoning tokens on gpt-5.x (was 2000)
   query_template_dir: vlm_query/
+  patterns_file: null       # Override task_specific_patterns source: null = env default template,
+                            # "none" = no task-specific patterns (generic-prompt ablation),
+                            # or a filename inside query_template_dir
 
 # ============================================================
 # SAM3 Segmentation (optional, disabled by default)
@@ -41,7 +44,7 @@ sam3:
 gemini_grounding:
   enabled: true
   api_key: null             # Set GOOGLE_API_KEY env var
-  model: gemini-3-flash-preview
+  model: gemini-robotics-er-2-preview  # rebuttal runs (was gemini-3-flash-preview for paper runs)
   
   # Default objects to detect (overridden per task)
   default_objects:
@@ -58,5 +61,5 @@ gemini_grounding:
 # ============================================================
 gemini:
   api_key: null             # Set GOOGLE_API_KEY env var
-  model: gemini-3-flash-preview  # Fast model for real-time queries
+  model: gemini-robotics-er-2-preview  # rebuttal runs; fastest tested (1.7s) + embodied-reasoning tier
 

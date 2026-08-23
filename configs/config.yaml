@@ -29,6 +29,11 @@ main:
   debug_draw_trajectory: false
   render: false
   
+  # Rebuttal ablation knobs (defaults = paper behavior)
+  steering_mode: vls          # vls | best_of_b (E3 compute-matched rerank control, pi05 only)
+  stage_switch_mode: vlm      # vlm | gripper (E9 deterministic stage-switching ablation)
+  keypoint_noise_sigma: 0.0   # E12 grounding-degradation ablation, meters
+
   # Steering parameters
   use_guidance: false
   use_vlm_stage_recognition: true  # Use Gemini to recognize current stage

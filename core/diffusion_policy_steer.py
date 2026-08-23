@@ -131,10 +131,16 @@ class DiffusionPolicySteer(DiffusionPolicy):
         fkd_config: Optional[dict] = None,
         global_step: int = 0,
         current_stage: int = 1,
+        steering_mode: str = "vls",
     ) -> Tensor:
 
         if batch is None:
             raise ValueError("batch cannot be None")
+        if steering_mode != "vls":
+            raise NotImplementedError(
+                f"steering_mode='{steering_mode}' is only implemented for PI05PolicySteer; "
+                "use the pi05 policy for best-of-B runs."
+            )
             
         if ACTION in batch:
             batch.pop(ACTION)

@@ -95,16 +95,19 @@ class PI05PolicySteer(PI05Policy):
         current_stage: int = 1,
         sigmoid_k: float = 12.0,
         sigmoid_x0: float = 0.7,
+        steering_mode: str = "vls",  # "vls" (default) | "best_of_b" (compute-matched rerank control, E3)
         **kwargs  # Ignore other params for backward compatibility
     ) -> Tensor:
 
         self.eval()
-        
+
         if ACTION in batch:
             batch.pop(ACTION)
 
         if generate_new_chunk:
-            if use_guidance and guidance_fns:
+            if steering_mode == "best_of_b" and guidance_fns and keypoints is not None:
+                action_chunk = self._best_of_b_chunk(batch, keypoints, guidance_fns, verbose=verbose)
+            elif use_guidance and guidance_fns:
                 action_chunk = self._sample_actions_guided(
                     batch=batch,
                     keypoints=keypoints,
@@ -129,6 +132,57 @@ class PI05PolicySteer(PI05Policy):
             action_chunk = self._cached_action_chunk
         
         return self._postprocessor(action_chunk) if self._postprocessor else action_chunk
+
+    def _best_of_b_chunk(
+        self,
+        batch: dict[str, Tensor],
+        keypoints: np.ndarray,
+        guidance_fn: Union[Callable, List[Callable]],
+        verbose: bool = False,
+    ) -> Tensor:
+        """
+        Compute-matched best-of-B control (E3): B independent UNGUIDED samples from the frozen
+        policy, scored ONCE at the end with the same VLM reward, reordered so index 0 is the
+        best particle. No gradient guidance, no RBF repulsion, no FK resampling.
+        Stage bookkeeping (normalized reward) is kept identical to VLS for a fair comparison.
+        """
+        action_chunk = self.predict_action_chunk(batch)  # (B, chunk, dim), pre-postprocessor
+        bsize = action_chunk.shape[0]
+        if bsize <= 1:
+            return action_chunk
+
+        device = action_chunk.device
+        keypoints_tensor = torch.tensor(keypoints, device=device, dtype=torch.float32)
+
+        with torch.no_grad():
+            traj = self._sample_to_trajectory_3d(action_chunk)[:, 1:self._action_chunk_horizon, :3]
+            rewards = []
+            for b in range(bsize):
+                try:
+                    if isinstance(guidance_fn, list):
+                        r = sum(fn(keypoints_tensor, traj[b:b+1]) for fn in guidance_fn)
+                    else:
+                        r = guidance_fn(keypoints_tensor, traj[b:b+1])
+                    rewards.append(float(r.item()) if hasattr(r, 'item') else float(r))
+                except Exception as e:
+                    log.warning(f"[BestOfB] reward failed for particle {b}: {e}")
+                    rewards.append(float('-inf'))
+
+        order = sorted(range(bsize), key=lambda i: rewards[i], reverse=True)
+        if verbose:
+            log.info(f"[BestOfB] B={bsize} rewards: best={rewards[order[0]]:.4f}, "
+                     f"median={rewards[order[bsize // 2]]:.4f}, worst={rewards[order[-1]]:.4f}")
+
+        # Keep stage machinery consistent with VLS (baseline = first chunk's best reward)
+        best_reward = rewards[order[0]]
+        if self._stage_init_reward is None:
+            self._stage_init_reward = best_reward
+        elif self._stage_init_reward < -1e-6:
+            norm = 1 - (best_reward / self._stage_init_reward)
+            self._last_normalized_reward = max(0.0, min(1.2, norm))
+
+        idx = torch.tensor(order, device=device, dtype=torch.long)
+        return action_chunk[idx]
 
     def _sample_actions_guided(
         self,
